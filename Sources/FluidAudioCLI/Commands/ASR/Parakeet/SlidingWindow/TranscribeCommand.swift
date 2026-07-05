@@ -211,6 +211,7 @@ enum TranscribeCommand {
         var encoderPrecision: ParakeetEncoderPrecision = .int8
         var melChunkContext = true
         var dualDecodeArbitration = false
+        var seamGapRepair = true
         var streamingMode = false
 
         // Streaming mode (SlidingWindowAsrConfig)
@@ -311,6 +312,8 @@ enum TranscribeCommand {
                 parsed.melChunkContext = false
             case "--dual-decode-arbitration":
                 parsed.dualDecodeArbitration = true
+            case "--no-seam-gap-repair":
+                parsed.seamGapRepair = false
 
             // Streaming mode config
             case "--chunk-seconds":
@@ -430,7 +433,8 @@ enum TranscribeCommand {
                 tdtConfig: tdtConfig,
                 encoderHiddenSize: args.modelVersion.encoderHiddenSize,
                 melChunkContext: args.melChunkContext,
-                dualDecodeArbitration: args.dualDecodeArbitration
+                dualDecodeArbitration: args.dualDecodeArbitration,
+                seamGapRepair: args.seamGapRepair
             )
             let asrManager = AsrManager(config: asrConfig)
             try await asrManager.loadModels(models)
