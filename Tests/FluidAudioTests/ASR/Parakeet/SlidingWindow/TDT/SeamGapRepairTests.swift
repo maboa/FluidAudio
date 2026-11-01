@@ -45,7 +45,9 @@ final class SeamGapRepairTests: XCTestCase {
     }
 
     /// A bordering word as `neighborWord` would describe it.
-    private func word(_ ids: [Int], _ timestamp: Int, vocabulary: [Int: String]? = nil) -> (text: String, timestamp: Int) {
+    private func word(
+        _ ids: [Int], _ timestamp: Int, vocabulary: [Int: String]? = nil
+    ) -> (text: String, timestamp: Int) {
         (ChunkProcessor.comparableWord(ids, vocabulary: vocabulary ?? self.vocabulary), timestamp)
     }
 
@@ -407,5 +409,33 @@ final class SeamGapRepairTests: XCTestCase {
         let processor = ChunkProcessor(audioSamples: [Float](repeating: 0.0, count: 16000 * 2))
         let threshold = try processor.adaptiveSpeechRmsThresholdForTesting()
         XCTAssertEqual(threshold, ChunkProcessor.speechRmsCeiling)
+    }
+
+    // MARK: - Placement order
+
+    /// A multi-second gap (the #758 seam-drop class) is probed cold-start at the gap first,
+    /// then gap-centred, and only then with the short window. Tried first, the short window
+    /// recovered only the back half of a 13 s Earnings-22 gap, and the residual front was
+    /// never re-probed.
+    func testLongGapTriesFullWindowsBeforeTheShortWindow() {
+        let rate = 16_000
+        let pad = rate * 4 / 5
+        let placements = ChunkProcessor.seamGapProbePlacements(
+            gapStartSample: 50 * rate, gapEndSample: 63 * rate, isLongGap: true,
+            windowSamples: 15 * rate, padSamples: pad)
+        XCTAssertEqual(
+            placements.map { $0.start },
+            [50 * rate, (50 * rate + 63 * rate) / 2 - 15 * rate / 2, 50 * rate - pad])
+        XCTAssertEqual(placements.map { $0.length }, [15 * rate, 15 * rate, 13 * rate + 2 * pad])
+    }
+
+    func testShortGapTriesOnlyTheShortWindow() {
+        let rate = 16_000
+        let pad = rate * 4 / 5
+        let placements = ChunkProcessor.seamGapProbePlacements(
+            gapStartSample: 10 * rate, gapEndSample: 10 * rate + rate / 2, isLongGap: false,
+            windowSamples: 15 * rate, padSamples: pad)
+        XCTAssertEqual(placements.map { $0.start }, [10 * rate - pad])
+        XCTAssertEqual(placements.map { $0.length }, [rate / 2 + 2 * pad])
     }
 }

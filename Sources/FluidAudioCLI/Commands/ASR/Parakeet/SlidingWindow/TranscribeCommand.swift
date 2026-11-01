@@ -615,7 +615,8 @@ enum TranscribeCommand {
                 melChunkContext: args.melChunkContext,
                 dualDecodeArbitration: args.dualDecodeArbitration,
                 seamGapRepair: args.seamGapRepair,
-                seamGapRepairMinGapSeconds: args.seamGapRepairMinGapSeconds ?? ASRConfig.default.seamGapRepairMinGapSeconds,
+                seamGapRepairMinGapSeconds: args.seamGapRepairMinGapSeconds
+                    ?? ASRConfig.default.seamGapRepairMinGapSeconds,
                 seamTimingRealignment: args.seamTimingRealignment
             )
             let asrManager = AsrManager(config: asrConfig)

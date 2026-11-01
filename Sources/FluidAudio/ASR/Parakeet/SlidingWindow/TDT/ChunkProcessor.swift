@@ -1673,7 +1673,9 @@ struct ChunkProcessor {
     ) -> (text: String, timestamp: Int) {
         let touching = wordNeighbor(in: stream, from: index, step: step, vocabulary: vocabulary)
         guard let safeIds = spliceSafeTokenIds,
-            let touchingIndex = stream.firstIndex(where: { $0.timestamp == touching.timestamp && $0.token == touching.token })
+            let touchingIndex = stream.firstIndex(where: {
+                $0.timestamp == touching.timestamp && $0.token == touching.token
+            })
         else {
             return (comparableWord([touching.token], vocabulary: vocabulary), touching.timestamp)
         }
@@ -1827,6 +1829,32 @@ struct ChunkProcessor {
     }
     #endif
 
+    /// The window placements a gap probe tries, in order, as (start sample,
+    /// length) before clamping to the audio. A multi-second gap (the
+    /// seam-drop class this pass was built for) gets the full-length
+    /// placements first — cold-start AT the gap (replaying the pre-gap noise
+    /// can re-blank), then gap-centred — see "Placement matters" in
+    /// LongTranscription.md. The short window (the gap plus `padSamples`
+    /// either side, padded to the model window by the encoder) is their
+    /// fallback, and the only placement for a shorter gap. Tried first on a
+    /// long gap, it can recover just the gap's tail; the residual front keeps
+    /// the probed start, so no later pass re-probes it.
+    static func seamGapProbePlacements(
+        gapStartSample: Int,
+        gapEndSample: Int,
+        isLongGap: Bool,
+        windowSamples: Int,
+        padSamples: Int
+    ) -> [(start: Int, length: Int)] {
+        var placements: [(start: Int, length: Int)] = []
+        if isLongGap {
+            placements.append((gapStartSample, windowSamples))
+            placements.append(((gapStartSample + gapEndSample) / 2 - windowSamples / 2, windowSamples))
+        }
+        placements.append((gapStartSample - padSamples, gapEndSample - gapStartSample + 2 * padSamples))
+        return placements
+    }
+
     /// One gap probe of the repair pass: the gap, the words bordering it,
     /// and the audio of each window placement, in the order they are tried.
     private struct SeamGapProbe: Sendable {
@@ -1870,7 +1898,8 @@ struct ChunkProcessor {
             frameSamples,
             ((probeSamples ?? maxModelSamples) - ASRConstants.melHopSize) / frameSamples * frameSamples
         )
-        let padSamples = Int(Self.seamGapShortWindowPadSeconds * Double(ASRConstants.sampleRate))
+        let padSamples =
+            Int(Self.seamGapShortWindowPadSeconds * Double(ASRConstants.sampleRate))
             / frameSamples * frameSamples
 
         var working = tokens
@@ -1911,21 +1940,13 @@ struct ChunkProcessor {
                 probedGapStarts.insert(gapStartFrame)
                 probes += 1
 
-                // The short window first: the gap plus its immediate
-                // neighbours, padded to the model window by the encoder. A
-                // multi-second gap (the seam-drop class this pass was built
-                // for) also gets the full-length placements — cold-start AT
-                // the gap (replaying the pre-gap noise can re-blank), then
-                // gap-centred — see "Placement matters" in
-                // LongTranscription.md.
-                let gapCenterSample = (gapStartSample + gapEndSample) / 2
-                var candidates: [(start: Int, length: Int)] = [
-                    (gapStartSample - padSamples, gapEndSample - gapStartSample + 2 * padSamples)
-                ]
-                if gapEndFrame - gapStartFrame >= fullWindowMinGapFrames {
-                    candidates.append((gapStartSample, windowSamples))
-                    candidates.append((gapCenterSample - windowSamples / 2, windowSamples))
-                }
+                let candidates = Self.seamGapProbePlacements(
+                    gapStartSample: gapStartSample,
+                    gapEndSample: gapEndSample,
+                    isLongGap: gapEndFrame - gapStartFrame >= fullWindowMinGapFrames,
+                    windowSamples: windowSamples,
+                    padSamples: padSamples
+                )
                 var placements: [(start: Int, audio: [Float], isLastChunk: Bool)] = []
                 for candidate in candidates {
                     let length = min(candidate.length, windowSamples)
