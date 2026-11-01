@@ -284,7 +284,7 @@ struct ChunkProcessor {
     /// prefix twice. V2-family models keep the zero-padded final window.
     static func supportsSuppressedPrefix(_ version: AsrModelVersion?) -> Bool {
         switch version {
-        case .v3, .redux, .ultra, .phonon2, .tdtJa: return true
+        case .v3, .redux, .ultra, .phonon2, .phonon25, .bark3, .bark3Clean, .tdtJa: return true
         default: return false
         }
     }
@@ -1690,10 +1690,11 @@ struct ChunkProcessor {
         return (comparableWord(pieces, vocabulary: vocabulary), stream[start].timestamp)
     }
 
-    /// Filter a probe window's tokens to the spliceable run: in-gap words,
-    /// completed when the gap end cuts through one, with re-hearings of the
-    /// bordering words removed — rules and tolerances in "Post-Merge Repair
-    /// Pass" (LongTranscription.md).
+    /// Filter a probe window's tokens to the spliceable run: in-gap words
+    /// (including frame zero at the file boundary), completed when the gap
+    /// end cuts through one, with re-hearings of the bordering words removed
+    /// — rules and tolerances in "Post-Merge Repair Pass"
+    /// (LongTranscription.md).
     static func spliceCandidate(
         windowTokens: [Int],
         windowTimestamps: [Int],
@@ -1701,7 +1702,7 @@ struct ChunkProcessor {
         windowDurations: [Int],
         gapStartFrame: Int,
         gapEndFrame: Int,
-        leadWord: (text: String, timestamp: Int),
+        leadWord: (text: String, timestamp: Int)?,
         tailWord: (text: String, timestamp: Int),
         spliceSafeTokenIds: Set<Int>?,
         vocabulary: [Int: String]
@@ -1729,7 +1730,8 @@ struct ChunkProcessor {
         var lastInGapIndex = -1
         for tokenIndex in 0..<windowTokens.count {
             let timestamp = windowTimestamps[tokenIndex]
-            guard timestamp > gapStartFrame, timestamp < gapEndFrame - 1 else { continue }
+            let afterStart = leadWord == nil ? timestamp >= gapStartFrame : timestamp > gapStartFrame
+            guard afterStart, timestamp < gapEndFrame - 1 else { continue }
             candidate.append(
                 (
                     token: windowTokens[tokenIndex],
@@ -1800,7 +1802,7 @@ struct ChunkProcessor {
             if distance <= samePositionFrames { return true }
             return !neighbor.text.isEmpty && text(range) == neighbor.text && distance <= edgeToleranceFrames
         }
-        while let first = wordRanges().first, echoesNeighbor(first, leadWord) {
+        while let leadWord, let first = wordRanges().first, echoesNeighbor(first, leadWord) {
             candidate.removeSubrange(first)
         }
         while let last = wordRanges().last, echoesNeighbor(last, tailWord) {
@@ -1860,13 +1862,14 @@ struct ChunkProcessor {
     private struct SeamGapProbe: Sendable {
         let gapStartFrame: Int
         let gapEndFrame: Int
-        let leadWord: (text: String, timestamp: Int)
+        let leadWord: (text: String, timestamp: Int)?
         let tailWord: (text: String, timestamp: Int)
         let placements: [(start: Int, audio: [Float], isLastChunk: Bool)]
     }
 
-    /// Re-decode inter-word gaps that plausibly contain dropped speech with
-    /// a fresh seam-free window and splice in only in-gap words (issue
+    /// Re-decode gaps between words, or before the first one, that plausibly
+    /// contain dropped speech with a fresh seam-free window and splice in
+    /// only in-gap words (issue
     /// #758). Genuine silence splices nothing. See "Post-Merge Repair Pass"
     /// in Documentation/ASR/LongTranscription.md. The probes of a pass are
     /// independent (they read the pre-pass tokens), so they run across the
@@ -1905,15 +1908,19 @@ struct ChunkProcessor {
         var working = tokens
         var probes = 0
         var probedGapStarts = Set<Int>()
+        // The opening-window blank is reproduced on v3-family decoding.
+        // Other models retain their existing interior-only repair path.
+        let modelVersion = await workers[0].modelVersion
+        let firstGapIndex = modelVersion?.isV3Family == true ? -1 : 0
         // Iterate so a partial recovery's residual gap (start has moved)
         // gets its own probe; yielded-nothing gaps are memoized and skipped.
         for _ in 0..<3 {
             var passProbes: [SeamGapProbe] = []
 
-            for index in 0..<(working.count - 1) {
+            for index in firstGapIndex..<(working.count - 1) {
                 guard probes < maxSeamGapRepairs else { break }
 
-                let current = working[index]
+                let current = index >= 0 ? working[index] : nil
                 let next = working[index + 1]
                 // A gap inside a word (slow "mille … novecento" between the
                 // pieces of "1929", or "E" … "'" written for "È") has nothing
@@ -1925,7 +1932,7 @@ struct ChunkProcessor {
                 }
                 // Conservative end of the current token: its decoded duration
                 // when present, else one frame (mirrors mergeChunks).
-                let gapStartFrame = current.timestamp + max(1, current.duration)
+                let gapStartFrame = current.map { $0.timestamp + max(1, $0.duration) } ?? 0
                 let gapEndFrame = next.timestamp
                 guard gapEndFrame - gapStartFrame >= minGapFrames else { continue }
                 guard !probedGapStarts.contains(gapStartFrame) else { continue }
@@ -1948,7 +1955,15 @@ struct ChunkProcessor {
                     padSamples: padSamples
                 )
                 var placements: [(start: Int, audio: [Float], isLastChunk: Bool)] = []
-                for candidate in candidates {
+                if index < 0 {
+                    // A full window from sample zero repeats the cut that blanked.
+                    // End at the first surviving token instead; residual interior
+                    // gaps in a partial recovery use the existing later passes.
+                    let windowEnd = min(gapEndSample, windowSamples)
+                    let windowAudio = try readSamples(offset: 0, count: windowEnd)
+                    placements.append((0, windowAudio, windowEnd >= totalSamples))
+                }
+                for candidate in index < 0 ? [] : candidates {
                     let length = min(candidate.length, windowSamples)
                     var windowStart = max(0, min(candidate.start, totalSamples - length))
                     windowStart = windowStart / frameSamples * frameSamples
@@ -1962,9 +1977,11 @@ struct ChunkProcessor {
                     SeamGapProbe(
                         gapStartFrame: gapStartFrame,
                         gapEndFrame: gapEndFrame,
-                        leadWord: Self.neighborWord(
-                            in: working, from: index, step: -1,
-                            spliceSafeTokenIds: spliceSafeTokenIds, vocabulary: vocabulary),
+                        leadWord: index >= 0
+                            ? Self.neighborWord(
+                                in: working, from: index, step: -1,
+                                spliceSafeTokenIds: spliceSafeTokenIds, vocabulary: vocabulary)
+                            : nil,
                         tailWord: Self.neighborWord(
                             in: working, from: index + 1, step: 1,
                             spliceSafeTokenIds: spliceSafeTokenIds, vocabulary: vocabulary),
