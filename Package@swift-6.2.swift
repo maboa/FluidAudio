@@ -48,7 +48,10 @@ let package = Package(
             name: "Diarizer",
             description: "Speaker diarization (pyannote, Sortformer, LS-EEND, Nemotron 3)."
         ),
-        .default(enabledTraits: ["NemoTextProcessing", "TTS", "Diarizer"]),
+        // Glider's fork: TTS off by default. Glider never uses text-to-speech, and
+        // the LuxTTS G2P bundle it would otherwise ship is espeak-ng (GPL-3.0+) and
+        // CC-BY-SA-derived data (ThirdPartyLicenses/LuxTtsEnglishG2P-LICENSE.md).
+        .default(enabledTraits: ["NemoTextProcessing", "Diarizer"]),
     ],
     dependencies: [],
     targets: [
