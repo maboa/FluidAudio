@@ -51,7 +51,10 @@ let package = Package(
         // Glider's fork: TTS off by default. Glider never uses text-to-speech, and
         // the LuxTTS G2P bundle it would otherwise ship is espeak-ng (GPL-3.0+) and
         // CC-BY-SA-derived data (ThirdPartyLicenses/LuxTtsEnglishG2P-LICENSE.md).
-        .default(enabledTraits: ["NemoTextProcessing", "Diarizer"]),
+        // NemoTextProcessing off too: only TextNormalizer and the TTS code use it,
+        // and Glider calls neither, so the prebuilt text-processing-rs library
+        // and the Rust crates it links stay out of the app.
+        .default(enabledTraits: ["Diarizer"]),
     ],
     dependencies: [],
     targets: [
